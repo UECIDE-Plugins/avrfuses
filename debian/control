@@ -1,0 +1,17 @@
+Source: avrfuses
+Section: main
+Priority: extra
+Maintainer: Matt Jenkins <matt@majenko.co.uk>
+Build-Depends: debhelper (>= 8.0.0)
+Standards-Version: 3.9.4
+
+Package: avrfuses
+Architecture: all
+XBSC-Group: Plugins
+XBSC-Subgroup: Programming
+Depends: avrdude-arduino
+Description: AVR Fuse Programmer
+ Read, edit and write AVR fuses with a USBASP programmer
+
+
+

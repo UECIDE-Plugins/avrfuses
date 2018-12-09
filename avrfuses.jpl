@@ -1,0 +1,1126 @@
+function onBoot() {
+}
+
+function getMainToolbarIcons(pl, icons) { 
+}
+
+function getMenuActions(pl, menu, actions) {
+    var wantedMenu = 0x0305; // Bottom of tools menu
+
+    if ((menu & wantedMenu) == wantedMenu) {
+        var act = new org.uecide.JSAction(
+            "",
+            "openAVRFusesWindow",
+            "Program AVR Fuses",
+            pl
+        );
+
+        actions.add(act);
+    }
+}
+
+function openAVRFusesWindow() {
+    var prog = new AVRFuseProgrammer();
+    prog.openWindow();
+}
+
+function getVersion() {
+    return "1.0.0";
+}
+
+
+function AVRFuseProgrammer() {
+    this.win = null;
+    this.mainPanel = null;
+    this.partSel = null;
+
+    this.low = 0xFF;
+    this.high = 0xFF;
+    this.ext = 0xFF;
+
+    this.lowbox = null;
+    this.highbox = null;
+    this.extbox = null;
+ 
+    this.programmer = null;
+
+    this.progButton = null;
+
+    this.chip = null;
+
+    this.populate = function(name) {
+        self = this;
+        this.mainPanel.setLayout(new java.awt.GridBagLayout());
+        var c = new java.awt.GridBagConstraints();
+        c.gridx = 0;
+        c.gridy = 0;
+        c.weightx = 0.5;
+        c.fill = java.awt.GridBagConstraints.HORIZONTAL;
+        this.mainPanel.removeAll();
+
+        for (var i = 0; i < this.chips.length; i++) {
+            if (this.chips[i].name == name) {
+                this.chip = this.chips[i];
+            }
+        }
+
+        if (this.chip == null) {
+            return;
+        }
+
+        for (var i = 0; i < this.chip.options.length; i++) {
+            var op = this.chip.options[i];
+            if (op.type == "combo") {
+                c.gridx = 0;
+                var label = new javax.swing.JLabel(op.name + ": ");
+                label.setHorizontalAlignment(javax.swing.SwingConstants.RIGHT);
+                this.mainPanel.add(label, c);
+                c.gridx = 1;
+                var combo = new javax.swing.JComboBox();
+                this.chip.options[i].widget = combo;
+                combo.setActionCommand(i);
+                for (var j = 0; j < op.options.length; j++) {
+                    combo.addItem(op.options[j].name);
+                }
+                this.mainPanel.add(combo, c);
+                combo.addActionListener(new java.awt.event.ActionListener({
+                    actionPerformed: function(e) {
+
+                        var widgetId = e.getSource().getActionCommand();
+                        var selectedItem = e.getSource().getSelectedIndex();
+
+                        var thisOption = self.chip.options[widgetId];
+                        var sel = thisOption.options[selectedItem];
+
+                        self.low &= sel.lowmask;
+                        self.low |= sel.low;
+
+                        self.high &= sel.highmask;
+                        self.high |= sel.high;
+
+                        self.ext &= sel.extmask;
+                        self.ext |= sel.ext;
+
+                        self.saveFuses();
+                        self.updateFuseBoxes();
+                    }
+                }));
+                c.gridy++;
+            } else if (op.type == "checkbox") {
+                c.gridx = 1;
+                var cb = new javax.swing.JCheckBox(op.name);
+                this.chip.options[i].widget = cb;
+                this.mainPanel.add(cb, c);
+
+                cb.setActionCommand(i);
+                cb.addActionListener(new java.awt.event.ActionListener({
+                    actionPerformed: function(e) {
+                        var widgetId = e.getSource().getActionCommand();
+                        var selected = e.getSource().isSelected();
+                        var thisOption = self.chip.options[widgetId];
+
+                        if (selected) {
+                            self.low &= (~thisOption.low);
+                            self.high &= (~thisOption.high);
+                            self.ext &= (~thisOption.ext);
+                        } else {
+                            self.low |= thisOption.low;
+                            self.high |= thisOption.high;
+                            self.ext |= thisOption.ext;
+                        } 
+                        self.saveFuses();
+                        self.updateFuseBoxes();
+                    }
+                }));
+
+                c.gridy++;
+
+            }
+        }
+
+        this.low = org.uecide.Preferences.getInteger("avrfuseprog." + this.chip.name + ".lfuse");
+        this.high = org.uecide.Preferences.getInteger("avrfuseprog." + this.chip.name + ".hfuse");
+        this.ext = org.uecide.Preferences.getInteger("avrfuseprog." + this.chip.name + ".efuse");
+        this.parseFuses(this.low, this.high, this.ext);
+
+        this.updateFuseBoxes();
+
+        this.win.repaint();
+        this.win.revalidate();
+    }
+
+    this.programUSBASP = function() {
+        var prog = org.uecide.Base.programmers.get("avrdude-arduino");
+        var exe = null;
+        var conf = null;
+
+        var arch = org.uecide.Base.getOSArch();
+
+        if (org.uecide.Base.isLinux()) {
+            if (arch == "amd64") {
+                exe = prog.getFolder() + "/linux64/avrdude";
+                conf = prog.getFolder() + "/linux64/avrdude.conf";
+            } else if (arch == "armhf") {
+                exe = prog.getFolder() + "/linux_pi/avrdude";
+                conf = prog.getFolder() + "/linux_pi/avrdude.conf";
+            } else if (arch == "armel") {
+                exe = prog.getFolder() + "/linux_pi/avrdude";
+                conf = prog.getFolder() + "/linux_pi/avrdude.conf";
+            } else {
+                exe = prog.getFolder() + "/linux32/avrdude";
+                conf = prog.getFolder() + "/linux32/avrdude.conf";
+            }
+        } else if (org.uecide.Base.isMacOS()) {
+            exe = prog.getFolder() + "/macosx/avrdude";
+            conf = prog.getFolder() + "/macosx/avrdude.conf";
+        } else if (org.uecide.Base.isWindows()) {
+            exe = prog.getFolder() + "/windows/avrdude.exe";
+            conf = prog.getFolder() + "/windows/avrdude.conf";
+        }       
+
+        if (exe == null) {
+            editor.error("Programmer not supported, sorry.");
+            return;
+        }
+
+        var l = this.low & this.chip.lowmask;
+        var h = this.high & this.chip.highmask;
+        var e = this.ext & this.chip.extmask;
+
+        var s = editor.getSketch();
+        var ctx = s.getContext();
+        editor.clearConsole();
+        editor.heading("Programming fuses...");
+        editor.bullet("lfuse...");
+        if (ctx.executeCommand(exe + "::-c::usbasp::-qqq::-p::" + this.chip.name + "::-C::" + conf + "::-U::lfuse:w:0x" + l.toString(16) + ":m", "")) {
+            editor.bullet2("Ok");
+        } else {
+            editor.error("Error programming lfuse.");
+            return;
+        }
+        editor.bullet("hfuse...");
+        if (ctx.executeCommand(exe + "::-c::usbasp::-qqq::-p::" + this.chip.name + "::-C::" + conf + "::-U::hfuse:w:0x" + h.toString(16) + ":m", "")) {
+            editor.bullet2("Ok");
+        } else {
+            editor.error("Error programming hfuse.");
+            return;
+        }
+        editor.bullet("efuse...");
+        if (ctx.executeCommand(exe + "::-c::usbasp::-qqq::-p::" + this.chip.name + "::-C::" + conf + "::-U::efuse:w:0x" + e.toString(16) + ":m", "")) {
+            editor.bullet2("Ok");
+        } else {
+            editor.error("Error programming efuse.");
+            return;
+        }
+        editor.bullet("Programming done");
+
+    }
+
+    this.readUSBASP = function() {
+        var prog = org.uecide.Base.programmers.get("avrdude-arduino");
+        var exe = null;
+        var conf = null;
+
+        var arch = org.uecide.Base.getOSArch();
+
+        if (org.uecide.Base.isLinux()) {
+            if (arch == "amd64") {
+                exe = prog.getFolder() + "/linux64/avrdude";
+                conf = prog.getFolder() + "/linux64/avrdude.conf";
+            } else if (arch == "armhf") {
+                exe = prog.getFolder() + "/linux_pi/avrdude";
+                conf = prog.getFolder() + "/linux_pi/avrdude.conf";
+            } else if (arch == "armel") {
+                exe = prog.getFolder() + "/linux_pi/avrdude";
+                conf = prog.getFolder() + "/linux_pi/avrdude.conf";
+            } else {
+                exe = prog.getFolder() + "/linux32/avrdude";
+                conf = prog.getFolder() + "/linux32/avrdude.conf";
+            }
+        } else if (org.uecide.Base.isMacOS()) {
+            exe = prog.getFolder() + "/macosx/avrdude";
+            conf = prog.getFolder() + "/macosx/avrdude.conf";
+        } else if (org.uecide.Base.isWindows()) {
+            exe = prog.getFolder() + "/windows/avrdude.exe";
+            conf = prog.getFolder() + "/windows/avrdude.conf";
+        }
+
+        if (exe == null) {
+            editor.error("Programmer not supported, sorry.");
+            return;
+        }
+
+        var s = editor.getSketch();
+        var ctx = s.getContext();
+        ctx.startBuffer();
+        ctx.executeCommand(exe + "::-qqq::-c::usbasp::-p::" + this.chip.name + "::-C::" + conf + "::-U::lfuse:r:-:h::-U::hfuse:r:-:h::-U::efuse:r:-:h", "");
+
+        var res = ctx.endBuffer();
+
+        if (!res.startsWith("0x")) {
+            editor.error("Error reading fuses.");
+            return;
+        }
+
+        var vals = res.split("\n");
+
+        if (vals.length < 3) {
+            editor.error("Error reading fuses.");
+            return;
+        }
+
+        var lfuse = parseInt(vals[0]);
+        var hfuse = parseInt(vals[1]);
+        var efuse = parseInt(vals[2]);
+
+        this.low = lfuse;
+        this.high = hfuse;
+        this.ext = efuse;
+        this.saveFuses();
+
+        this.parseFuses(lfuse, hfuse, efuse);
+
+
+    }
+
+    this.openWindow = function() {
+
+        this.win = new javax.swing.JDialog();
+        this.win.setLayout(new java.awt.BorderLayout());
+        this.win.setTitle("AVR Fuses Programmer");
+
+        var topLine = new javax.swing.JPanel();
+
+        topLine.add(new javax.swing.JLabel("Part: "));
+
+
+        var selectedPart = org.uecide.Preferences.get("avrfuseprog.selected");
+        if (selectedPart == null) {
+            selectedPart = this.chips[0].name;
+        }
+        this.partSel = new javax.swing.JComboBox();
+
+        for (var i = 0; i < this.chips.length; i++) {
+            this.partSel.addItem(this.chips[i].name);
+        }
+
+        topLine.add(this.partSel);
+
+
+        topLine.add(new javax.swing.JLabel(" Programmer: "));
+
+        this.programmer = new javax.swing.JComboBox(["USBASP"]);
+        this.programmer.addActionListener(new java.awt.event.ActionListener({
+            actionPerformed: function(e) {
+                org.uecide.Preferences.setInteger("avrfuseprog.programmer", e.getSource().getSelectedIndex());
+            }
+        }));
+        this.programmer.setSelectedIndex(org.uecide.Preferences.getInteger("avrfuseprog.programmer"));
+
+        topLine.add(this.programmer);
+
+        var readFusesButton = new javax.swing.JButton("Read Fuses");
+
+        readFusesButton.addActionListener(new java.awt.event.ActionListener({
+            actionPerformed: function(e) {
+                var i = self.programmer.getSelectedIndex();
+                switch (i) {
+                    case 0: self.readUSBASP(); break;
+                }
+            }
+        }));
+
+        topLine.add(readFusesButton);
+
+        this.win.add(topLine, java.awt.BorderLayout.NORTH);
+
+        var bottomPanel = new javax.swing.JPanel();
+        bottomPanel.add(new javax.swing.JLabel("Low: "));
+        this.lowbox = new javax.swing.JTextField(5);
+        bottomPanel.add(this.lowbox);
+
+        bottomPanel.add(new javax.swing.JLabel(" High: "));
+        this.highbox = new javax.swing.JTextField(5);
+        bottomPanel.add(this.highbox);
+
+        bottomPanel.add(new javax.swing.JLabel(" Extended: "));
+        this.extbox = new javax.swing.JTextField(5);
+        bottomPanel.add(this.extbox);
+
+        this.lowbox.setEditable(false);
+        this.highbox.setEditable(false);
+        this.extbox.setEditable(false);
+
+        this.progButton = new javax.swing.JButton("Program Fuses");
+        bottomPanel.add(this.progButton);
+
+        this.progButton.addActionListener(new java.awt.event.ActionListener({
+            actionPerformed: function(e) {
+                var i = self.programmer.getSelectedIndex();
+                switch (i) {
+                    case 0: self.programUSBASP(); break;
+                }
+            }
+        }));
+
+        this.win.add(bottomPanel, java.awt.BorderLayout.SOUTH);
+
+        this.updateFuseBoxes();
+
+
+        this.mainPanel = new javax.swing.JPanel();
+
+        this.mainPanel.setBorder(new javax.swing.border.EmptyBorder(5, 5, 5, 5));
+
+        this.win.add(this.mainPanel, java.awt.BorderLayout.CENTER);
+
+        var me = this;
+
+        this.partSel.addActionListener(new java.awt.event.ActionListener({
+            actionPerformed: function(e) {
+                var ob = e.getSource();
+                var it = ob.getSelectedItem();
+                org.uecide.Preferences.set("avrfuseprog.selected", it);
+                me.populate(it);
+
+            }
+        }));
+
+        for (var i = 0; i < this.partSel.getItemCount(); i++) {
+            if (this.partSel.getItemAt(i).equals(selectedPart)) {
+                this.partSel.setSelectedIndex(i);
+            }
+        }
+
+//        this.win.setSize(600, 400);
+        this.win.pack();
+        this.win.setLocationRelativeTo(null);
+
+        this.win.setVisible(true);
+    }
+
+    this.updateFuseBoxes = function() {
+        if (this.chip == null) return;
+        var l = this.low & this.chip.lowmask;
+        var h = this.high & this.chip.highmask;
+        var e = this.ext & this.chip.extmask;
+
+        this.lowbox.setText(l.toString(16));
+        this.highbox.setText(h.toString(16));
+        this.extbox.setText(e.toString(16));
+    }
+
+    this.parseFuses = function(l, h, e) {
+        for (var i = 0; i < this.chip.options.length; i++) {
+            if (this.chip.options[i].type == "combo") {
+                for (var j = 0; j < this.chip.options[i].options.length; j++) {
+                    if (this.chip.options[i].options[j].lowmask != 0xFF) {
+                        var lval = l & (~this.chip.options[i].options[j].lowmask);
+                        if (lval == this.chip.options[i].options[j].low) {
+                            this.chip.options[i].widget.setSelectedIndex(j);
+                        }
+                    }
+                    if (this.chip.options[i].options[j].highmask != 0xFF) {
+                        var lval = h & (~this.chip.options[i].options[j].highmask);
+                        if (lval == this.chip.options[i].options[j].high) {
+                            this.chip.options[i].widget.setSelectedIndex(j);
+                        }
+                    }
+                    if (this.chip.options[i].options[j].extmask != 0xFF) {
+                        var lval = e & (~this.chip.options[i].options[j].extmask);
+                        if (lval == this.chip.options[i].options[j].ext) {
+                            this.chip.options[i].widget.setSelectedIndex(j);
+                        }
+                    }
+                }
+            } else if (this.chip.options[i].type == "checkbox") {
+                if (this.chip.options[i].low != 0x00) {
+                    this.chip.options[i].widget.setSelected((l & this.chip.options[i].low) == 0);
+                }
+                if (this.chip.options[i].high != 0x00) {
+                    this.chip.options[i].widget.setSelected((h & this.chip.options[i].high) == 0);
+                }
+                if (this.chip.options[i].ext != 0x00) {
+                    this.chip.options[i].widget.setSelected((e & this.chip.options[i].ext) == 0);
+                }
+            }
+        }
+
+        this.low = l;
+        this.high = h;
+        this.ext = e;
+        this.updateFuseBoxes();
+    }
+
+    this.saveFuses = function() {
+        org.uecide.Preferences.setInteger("avrfuseprog." + this.chip.name + ".lfuse", this.low);
+        org.uecide.Preferences.setInteger("avrfuseprog." + this.chip.name + ".hfuse", this.high);
+        org.uecide.Preferences.setInteger("avrfuseprog." + this.chip.name + ".efuse", this.ext);
+    }
+
+// ----
+// Chip definitions
+// ----
+
+    this.chips = [
+        { 
+            name: "ATMega328P",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                { 
+                    type: "combo", 
+                    name: "Clock Source", 
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ] 
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }, 
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }, 
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }, 
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0x3F00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0x3E00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x3C00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x3800 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "debugWIRE programming enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "External reset disable", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+                    
+            ]
+        },
+        {
+            name: "ATMega2560",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "512 Words (0x1FE00 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x1FC00 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x1F800 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "4096 Words (0x1F000 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "JTAG programminmg / debugging enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "OCD programming / debugging enabled", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "1.8V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+
+            ]
+        },
+        {
+            name: "ATMega2561",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "512 Words (0x1FE00 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x1FC00 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x1F800 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "4096 Words (0x1F000 - 0x1FFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "JTAG programminmg / debugging enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "OCD programming / debugging enabled", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "1.8V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+
+            ]
+        },
+        {
+            name: "ATMega640",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "512 Words (0x7E00 - 0x7FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x7C00 - 0x7FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x7800 - 0x7FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "4096 Words (0x7000 - 0x7FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "JTAG programminmg / debugging enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "OCD programming / debugging enabled", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "1.8V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+
+            ]
+        },
+        {
+            name: "ATMega1280",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "512 Words (0xFE00 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0xFC00 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0xF800 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "4096 Words (0xF000 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "JTAG programminmg / debugging enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "OCD programming / debugging enabled", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "1.8V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+
+            ]
+        },
+        {
+            name: "ATMega1281",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x07,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Internal 128kHz RC oscillator", lowmask: 0xF0, low: 0x03, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crystal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "512 Words (0xFE00 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0xFC00 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0xF800 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "4096 Words (0xF000 - 0xFFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "JTAG programminmg / debugging enabled", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "OCD programming / debugging enabled", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "1.8V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 }
+                    ]
+                }
+
+            ]
+        },
+        {
+            name: "ATMega8U2",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x0F,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0xF00 - 0xFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0xE00 - 0xFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0xC00 - 0xFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x800 - 0xFFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "Disable reset", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "Enable debugWIRE (and disable reset)", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "3.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 },
+                        { name: "3.5V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x03 },
+                        { name: "4.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x01 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x00 }
+                    ]
+                },
+                { type: "checkbox", name: "Hardware Boot Enable", low: 0x00, high: 0x00, ext: 0x08 }
+
+            ]
+        },
+        {
+            name: "ATMega16U2",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x0F,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },   
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0x1F00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0x1E00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x1C00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x1800 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "Disable reset", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "Enable debugWIRE (and disable reset)", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "3.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 },
+                        { name: "3.5V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x03 },
+                        { name: "4.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x01 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x00 }
+                    ]
+                },
+                { type: "checkbox", name: "Hardware Boot Enable", low: 0x00, high: 0x00, ext: 0x08 }
+
+            ]
+        },
+        {
+            name: "ATMega32U2",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x0F,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Full swing crystal oscillator", lowmask: 0xF0, low: 0x07, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },   
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0x3F00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0x3E00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x3C00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x3800 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "Disable reset", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "Enable debugWIRE (and disable reset)", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.7V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "3.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 },
+                        { name: "3.5V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x03 },
+                        { name: "4.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x01 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x00 }
+                    ]
+                },
+                { type: "checkbox", name: "Hardware Boot Enable", low: 0x00, high: 0x00, ext: 0x08 }
+
+            ]
+        },
+
+
+        {
+            name: "ATMega32U4",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x0F,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crustal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },   
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0x3F00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0x3E00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x3C00 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x3800 - 0x3FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "Enable JTAG programming / debugging", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "Enable OCD programminmg / debugging", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.2V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "2.4V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 },
+                        { name: "2.6V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x03 },
+                        { name: "3.4V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x02 },
+                        { name: "3.5V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x01 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x00 }
+                    ]
+                },
+                { type: "checkbox", name: "Hardware Boot Enable", low: 0x00, high: 0x00, ext: 0x08 }
+
+            ]
+        },
+        {
+            name: "ATMega16U4",
+            lowmask: 0xFF,
+            highmask: 0xFF,
+            extmask: 0x0F,
+            options: [
+                {
+                    type: "combo",
+                    name: "Clock Source",
+                    options: [
+                        { name: "External Clock", lowmask: 0xF0, low: 0x0, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00},
+                        { name: "Calibrated internal RC oscillator", lowmask: 0xF0, low: 0x02, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low frequency crustal oscillator", lowmask: 0xF0, low: 0x04, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Low power crystal oscillator", lowmask: 0xF0, low: 0x0F, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 }
+                    ]
+                },
+                {
+                    type: "combo",
+                    name: "Start-up Time",
+                    options: [
+                        { name: "BOD enabled", lowmask: 0xCF, low: 0x10, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Fast Rising", lowmask: 0xCF, low: 0x20, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                        { name: "Slow Rising", lowmask: 0xCF, low: 0x30, highmask: 0xFF, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Clock Output", low: 0x40, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Divide clock by 8", low: 0x80, high: 0x00, ext: 0x00    },
+                { type: "checkbox", name: "Reset to Bootloader", low: 0x00, high: 0x01, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Bootloader Size",
+                    options: [
+                        { name: "256 Words (0x1F00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x06, extmask: 0xFF, ext: 0x00 },
+                        { name: "512 Words (0x1E00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x04, extmask: 0xFF, ext: 0x00 },
+                        { name: "1024 Words (0x1C00 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x02, extmask: 0xFF, ext: 0x00 },
+                        { name: "2048 Words (0x1800 - 0x1FFF)", lowmask: 0xFF, low: 0x00, highmask: 0xF9, high: 0x00, extmask: 0xFF, ext: 0x00 },
+                    ]
+                },
+                { type: "checkbox", name: "Chip erase saves EEPROM", low: 0x00, high: 0x08, ext: 0x00 },
+                { type: "checkbox", name: "Watchdog always enabled", low: 0x00, high: 0x10, ext: 0x00 },
+                { type: "checkbox", name: "Serial programming enabled (SPI)", low: 0x00, high: 0x20, ext: 0x00 },
+                { type: "checkbox", name: "Enable JTAG programming / debugging", low: 0x00, high: 0x40, ext: 0x00 },
+                { type: "checkbox", name: "Enable OCD programminmg / debugging", low: 0x00, high: 0x80, ext: 0x00 },
+                {
+                    type: "combo",
+                    name: "Brown-out voltage level",
+                    options: [
+                        { name: "Disabled", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x07 },
+                        { name: "2.0V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x06 },
+                        { name: "2.2V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x05 },
+                        { name: "2.4V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x04 },
+                        { name: "2.6V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x03 },
+                        { name: "3.4V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x02 },
+                        { name: "3.5V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x01 },
+                        { name: "4.3V", lowmask: 0xFF, low: 0x00, highmask: 0xFF, high: 0x00, extmask: 0xF8, ext: 0x00 }
+                    ]
+                },
+                { type: "checkbox", name: "Hardware Boot Enable", low: 0x00, high: 0x00, ext: 0x08 }
+
+            ]
+        },
+
+
+
+
+
+
+
+
+    ];
+
+}
+
+
